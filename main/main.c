@@ -54,6 +54,11 @@ static const char *TAG_MQTT = "mqtt";
 // #define CONFIG_USER_USE_SPI_ETHERNET true
 // #define CONFIG_USER_USE_W5500 true
 
+esp_mqtt_client_handle_t client_obj;
+
+bool esp_ethernet_ready = false;
+bool esp_mqtt_ready = false;
+
 #if CONFIG_USER_USE_SPI_ETHERNET
 #define INIT_SPI_ETH_MODULE_CONFIG(eth_module_config, num)                                  \
     do {                                                                                    \
@@ -87,6 +92,7 @@ static void eth_event_handler(void *arg, esp_event_base_t event_base,
         break;
     case ETHERNET_EVENT_DISCONNECTED:
         ESP_LOGI(TAG_ETH, "Ethernet Link Down");
+        esp_ethernet_ready = false;
         break;
     case ETHERNET_EVENT_START:
         ESP_LOGI(TAG_ETH, "Ethernet Started");
@@ -112,6 +118,8 @@ static void got_ip_event_handler(void *arg, esp_event_base_t event_base,
     ESP_LOGI(TAG_ETH, "ETH-MASK : " IPSTR, IP2STR(&ip_info->netmask));
     ESP_LOGI(TAG_ETH, "ETH-GW   : " IPSTR, IP2STR(&ip_info->gw));
     ESP_LOGI(TAG_ETH, "=========================");
+
+    esp_ethernet_ready = true;
 }
 
 void ethernet_connect(void)
@@ -234,6 +242,11 @@ void ethernet_connect(void)
 #endif // CONFIG_USER_USE_SPI_ETHERNET
 }
 
+void mqtt_data_parser(esp_mqtt_event_handle_t event) {
+    ESP_LOGI(TAG_MQTT, "TOPIC=%.*s", event->topic_len, event->topic);
+    ESP_LOGI(TAG_MQTT, "DATA=%.*s", event->data_len, event->data);
+}
+
 static void log_error_if_nonzero(const char *message, int error_code)
 {
     if (error_code != 0) {
@@ -250,6 +263,7 @@ static void log_error_if_nonzero(const char *message, int error_code)
  * @param event_id The id for the received event.
  * @param event_data The data for the event, esp_mqtt_event_handle_t.
  */
+
 static void mqtt_event_handler(void *handler_args, esp_event_base_t base, int32_t event_id, void *event_data)
 {
     ESP_LOGD(TAG_MQTT, "Event dispatched from event loop base=%s, event_id=%d", base, event_id);
@@ -263,22 +277,14 @@ static void mqtt_event_handler(void *handler_args, esp_event_base_t base, int32_
         msg_id = esp_mqtt_client_subscribe(client, "esp32/dev91", 0);
         ESP_LOGI(TAG_MQTT, "sent subscribe successful, msg_id=%d", msg_id);
 
-        msg_id = esp_mqtt_client_subscribe(client, "/topic/qos1", 1);
-        ESP_LOGI(TAG_MQTT, "sent subscribe successful, msg_id=%d", msg_id);
-        
-        msg_id = esp_mqtt_client_publish(client, "/topic/qos1", "data_3", 0, 1, 0);
-        ESP_LOGI(TAG_MQTT, "sent publish successful, msg_id=%d", msg_id);
-        // msg_id = esp_mqtt_client_unsubscribe(client, "/topic/qos1");
-        // ESP_LOGI(TAG_MQTT, "sent unsubscribe successful, msg_id=%d", msg_id);
+        esp_mqtt_ready = true;
         break;
     case MQTT_EVENT_DISCONNECTED:
         ESP_LOGI(TAG_MQTT, "MQTT_EVENT_DISCONNECTED");
+        esp_mqtt_ready = false;
         break;
-
     case MQTT_EVENT_SUBSCRIBED:
         ESP_LOGI(TAG_MQTT, "MQTT_EVENT_SUBSCRIBED, msg_id=%d", event->msg_id);
-        // msg_id = esp_mqtt_client_publish(client, "/topic/qos0", "data", 0, 0, 0);
-        // ESP_LOGI(TAG_MQTT, "sent publish successful, msg_id=%d", msg_id);
         break;
     case MQTT_EVENT_UNSUBSCRIBED:
         ESP_LOGI(TAG_MQTT, "MQTT_EVENT_UNSUBSCRIBED, msg_id=%d", event->msg_id);
@@ -288,8 +294,7 @@ static void mqtt_event_handler(void *handler_args, esp_event_base_t base, int32_
         break;
     case MQTT_EVENT_DATA:
         ESP_LOGI(TAG_MQTT, "MQTT_EVENT_DATA");
-        ESP_LOGI(TAG_MQTT, "TOPIC=%.*s", event->topic_len, event->topic);
-        ESP_LOGI(TAG_MQTT, "DATA=%.*s", event->data_len, event->data);
+        mqtt_data_parser(event);
         break;
     case MQTT_EVENT_ERROR:
         ESP_LOGI(TAG_MQTT, "MQTT_EVENT_ERROR");
@@ -316,15 +321,33 @@ static void mqtt_app_start(void)
         .password = CONFIG_USER_BROKER_PASS,
     };
 
-    esp_mqtt_client_handle_t client = esp_mqtt_client_init(&mqtt_cfg);
+    // esp_mqtt_client_handle_t 
+    client_obj = esp_mqtt_client_init(&mqtt_cfg);
     /* The last argument may be used to pass data to the event handler, in this example mqtt_event_handler */
-    esp_mqtt_client_register_event(client, ESP_EVENT_ANY_ID, mqtt_event_handler, NULL);
-    esp_mqtt_client_start(client);
+    esp_mqtt_client_register_event(client_obj, ESP_EVENT_ANY_ID, mqtt_event_handler, NULL);
+    esp_mqtt_client_start(client_obj);
 }
 
 void app_main(void)
 {
     ethernet_connect();
-    // vTaskDelay(2000, portTICK_PERIOD_MS);
+
+    while (!esp_ethernet_ready);  // ethernet이 준비되기까지 잠시 대기 
     mqtt_app_start();
+
+    int cnt = 0;
+    while (1) {
+        if (esp_mqtt_ready) {  // mqtt가 준비되기까지 잠시 대기 
+            cnt++;
+            char publish_data[100] = { 0x00, };
+            sprintf(publish_data, "publish data cnt : %d", cnt);
+            
+            int msg_id = esp_mqtt_client_publish(client_obj, "/topic/haha", publish_data, 0, 1, 0);
+            
+            vTaskDelay(5000 / portTICK_PERIOD_MS);
+        } else {
+            // ESP_LOGI(TAG_MQTT, "MQTT Not Ready");
+            vTaskDelay(1000 / portTICK_PERIOD_MS);    
+        }
+    }
 }
