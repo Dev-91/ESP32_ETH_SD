@@ -35,8 +35,12 @@
 // #include "esp_log.h"
 #include "mqtt_client.h"
 
+#include "math.h"
+
 static const char *TAG_ETH = "ethernet";
 static const char *TAG_MQTT = "mqtt";
+
+int countX = 0;
 
 // #define CONFIG_USER_SPI_ETHERNETS_NUM 1
 // #define CONFIG_USER_ETH_SPI_HOST 1
@@ -275,7 +279,6 @@ static void mqtt_event_handler(void *handler_args, esp_event_base_t base, int32_
         ESP_LOGI(TAG_MQTT, "MQTT_EVENT_CONNECTED");
 
         msg_id = esp_mqtt_client_subscribe(client, "esp32/dev91", 0);
-        ESP_LOGI(TAG_MQTT, "sent subscribe successful, msg_id=%d", msg_id);
 
         esp_mqtt_ready = true;
         break;
@@ -328,16 +331,10 @@ static void mqtt_app_start(void)
     esp_mqtt_client_start(client_obj);
 }
 
-void app_main(void)
-{
-    ethernet_connect();
-
-    while (!esp_ethernet_ready);  // ethernet이 준비되기까지 잠시 대기 
-    mqtt_app_start();
-
+void period_task(void *pvParameter) { //
     int cnt = 0;
     while (1) {
-        if (esp_mqtt_ready) {  // mqtt가 준비되기까지 잠시 대기 
+        if (esp_mqtt_ready) {  // mqtt 연결 문제 발생시 전송 일시 중단
             cnt++;
             char publish_data[100] = { 0x00, };
             sprintf(publish_data, "publish data cnt : %d", cnt);
@@ -350,4 +347,36 @@ void app_main(void)
             vTaskDelay(1000 / portTICK_PERIOD_MS);    
         }
     }
+}
+
+void blink_task(void *pvParameter) {
+    gpio_pad_select_gpio(CONFIG_USER_BLINK_GPIO);
+
+    gpio_set_direction(CONFIG_USER_BLINK_GPIO, GPIO_MODE_OUTPUT);
+
+    while(1) {
+        gpio_set_level(CONFIG_USER_BLINK_GPIO, 1);
+        printf("HIGH\n");
+        vTaskDelay(200 / portTICK_PERIOD_MS);
+        gpio_set_level(CONFIG_USER_BLINK_GPIO, 0);
+        printf("LOW\n");
+        vTaskDelay(200 / portTICK_PERIOD_MS);
+    }
+}
+
+void app_main(void)
+{
+    vTaskDelay(4000 / portTICK_PERIOD_MS);
+    ethernet_connect();
+    while (!esp_ethernet_ready);  // ethernet이 준비되기까지 잠시 대기 
+
+    mqtt_app_start();
+    while (!esp_mqtt_ready);  // mqtt가 준비되기까지 잠시 대기
+    
+    xTaskCreatePinnedToCore(&blink_task, "blink_task", 8192, NULL, 5, NULL, APP_CPU_NUM);
+    xTaskCreatePinnedToCore(&period_task, "period_task", 8192, NULL, 5, NULL, PRO_CPU_NUM);
+
+    // while(1) {
+    //     vTaskDelay(10 / portTICK_PERIOD_MS);
+    // }
 }
