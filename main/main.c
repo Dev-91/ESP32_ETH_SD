@@ -37,18 +37,36 @@
 
 #include "math.h"
 
+#include <string.h>
+#include <sys/unistd.h>
+#include <sys/stat.h>
+#include "esp_vfs_fat.h"
+#include "sdmmc_cmd.h"
+
+
 static const char *TAG_ETH = "ethernet";
 static const char *TAG_MQTT = "mqtt";
+static const char *TAG_SD = "sd";
 
 int countX = 0;
 
+#define USER_BLINK_GPIO 23
+
+// #define USER_SD_SPI_MISO_GPIO 25
+// #define USER_SD_SPI_MOSI_GPIO 26
+// #define USER_SD_SPI_CLK_GPIO 27
+#define USER_SD_SPI_CS_GPIO 14
+
+#define SPI_DMA_CHAN    1
+
+#define MOUNT_POINT "/sdcard"
+
+sdmmc_card_t *card;
+const char mount_point[] = MOUNT_POINT;
+sdmmc_host_t host = SDSPI_HOST_DEFAULT();
 // #define CONFIG_USER_SPI_ETHERNETS_NUM 1
 // #define CONFIG_USER_ETH_SPI_HOST 1
 // #define CONFIG_USER_ETH_SPI_CLOCK_MHZ 12
-
-// #define CONFIG_USER_ETH_SPI_MISO_GPIO 12
-// #define CONFIG_USER_ETH_SPI_MOSI_GPIO 13
-// #define CONFIG_USER_ETH_SPI_SCLK_GPIO 14
 
 // #define CONFIG_USER_ETH_SPI_CS0_GPIO 15
 // #define CONFIG_USER_ETH_SPI_INT0_GPIO 1
@@ -171,6 +189,7 @@ void ethernet_connect(void)
         .sclk_io_num = CONFIG_USER_ETH_SPI_SCLK_GPIO,
         .quadwp_io_num = -1,
         .quadhd_io_num = -1,
+        .max_transfer_sz = 4000,
     };
     ESP_ERROR_CHECK(spi_bus_initialize(CONFIG_USER_ETH_SPI_HOST, &buscfg, SPI_DMA_CH_AUTO));
 
@@ -332,6 +351,9 @@ static void mqtt_app_start(void)
 }
 
 void period_task(void *pvParameter) { //
+    gpio_pad_select_gpio(USER_BLINK_GPIO);
+
+    gpio_set_direction(USER_BLINK_GPIO, GPIO_MODE_OUTPUT);
     int cnt = 0;
     while (1) {
         if (esp_mqtt_ready) {  // mqtt 연결 문제 발생시 전송 일시 중단
@@ -339,7 +361,9 @@ void period_task(void *pvParameter) { //
             char publish_data[100] = { 0x00, };
             sprintf(publish_data, "publish data cnt : %d", cnt);
             
+            gpio_set_level(USER_BLINK_GPIO, 1);
             int msg_id = esp_mqtt_client_publish(client_obj, "/topic/haha", publish_data, 0, 1, 0);
+            gpio_set_level(USER_BLINK_GPIO, 0);
             
             vTaskDelay(5000 / portTICK_PERIOD_MS);
         } else {
@@ -350,33 +374,181 @@ void period_task(void *pvParameter) { //
 }
 
 void blink_task(void *pvParameter) {
-    gpio_pad_select_gpio(CONFIG_USER_BLINK_GPIO);
+    gpio_pad_select_gpio(USER_BLINK_GPIO);
 
-    gpio_set_direction(CONFIG_USER_BLINK_GPIO, GPIO_MODE_OUTPUT);
+    gpio_set_direction(USER_BLINK_GPIO, GPIO_MODE_OUTPUT);
 
     while(1) {
-        gpio_set_level(CONFIG_USER_BLINK_GPIO, 1);
-        printf("HIGH\n");
+        gpio_set_level(USER_BLINK_GPIO, 1);
+        // printf("HIGH\n");
         vTaskDelay(200 / portTICK_PERIOD_MS);
-        gpio_set_level(CONFIG_USER_BLINK_GPIO, 0);
-        printf("LOW\n");
+        gpio_set_level(USER_BLINK_GPIO, 0);
+        // printf("LOW\n");
         vTaskDelay(200 / portTICK_PERIOD_MS);
     }
 }
 
+void dev_info(void) {
+     
+    // uint64_t chipid;
+    
+    // chipid=ESP.getEfuseMac(); // The chip ID is essentially its MAC address(length: 6 bytes)
+    // printf("ESP32 Chip ID = %04X", (uint16_t)(chipid>>32)); // print High 2 bytes
+    // printf("%08X\n", (uint32_t)chipid); // print Low 4bytes
+    // printf("---------------------------------\n");
+     
+    // printf("Chip Revision %d\n", ESP.getChipRevision());
+    
+    static const char *TAG_INFO = "chip_info";
+    esp_chip_info_t chip_info;
+    
+    esp_chip_info(&chip_info);
+    ESP_LOGI(TAG_INFO, "Number of Core: %d", chip_info.cores);
+    ESP_LOGI(TAG_INFO, "CHIP Revision Number: %d", chip_info.revision); 
+     
+    // ESP_LOGI(TAG_INFO, "Flash Chip Size = %d byte", ESP.getFlashChipSize());
+    // ESP_LOGI(TAG_INFO, "Flash Frequency = %d Hz", ESP.getFlashChipSpeed());
+    // ESP_LOGI(TAG_INFO, "");
+     
+    ESP_LOGI(TAG_INFO, "ESP-IDF version = %s", esp_get_idf_version());
+     
+    // ESP_LOGI(TAG_INFO, "Total Heap Size = %d", ESP.getHeapSize());
+    // ESP_LOGI(TAG_INFO, "Free Heap Size = %d", ESP.getFreeHeap());
+    // ESP_LOGI(TAG_INFO, "Lowest Free Heap Size = %d", ESP.getMinFreeHeap());
+    // ESP_LOGI(TAG_INFO, "Largest Heap Block = %d", ESP.getMaxAllocHeap());
+    // ESP_LOGI(TAG_INFO, "");
+     
+    uint8_t mac0[6];
+    esp_efuse_mac_get_default(mac0);
+    ESP_LOGI(TAG_INFO, "Default Mac Address = %02X:%02X:%02X:%02X:%02X:%02X", mac0[0], mac0[1], mac0[2], mac0[3], mac0[4], mac0[5]);
+     
+    uint8_t mac3[6];
+    esp_read_mac(mac3, ESP_MAC_WIFI_STA);
+    ESP_LOGI(TAG_INFO, "[Wi-Fi Station] Mac Address = %02X:%02X:%02X:%02X:%02X:%02X", mac3[0], mac3[1], mac3[2], mac3[3], mac3[4], mac3[5]);
+     
+    uint8_t mac4[7];
+    esp_read_mac(mac4, ESP_MAC_WIFI_SOFTAP);
+    ESP_LOGI(TAG_INFO, "[Wi-Fi SoftAP] Mac Address = %02X:%02X:%02X:%02X:%02X:%02X", mac4[0], mac4[1], mac4[2], mac4[3], mac4[4], mac4[5]);
+     
+    uint8_t mac5[6];
+    esp_read_mac(mac5, ESP_MAC_BT);
+    ESP_LOGI(TAG_INFO, "[Bluetooth] Mac Address = %02X:%02X:%02X:%02X:%02X:%02X", mac5[0], mac5[1], mac5[2], mac5[3], mac5[4], mac5[5]);
+     
+    uint8_t mac6[6];
+    esp_read_mac(mac6, ESP_MAC_ETH);
+    ESP_LOGI(TAG_INFO, "[Ethernet] Mac Address = %02X:%02X:%02X:%02X:%02X:%02X", mac6[0], mac6[1], mac6[2], mac6[3], mac6[4], mac6[5]);
+}
+
+void sd_card_mount(void) {
+
+    esp_err_t ret;
+
+    // Options for mounting the filesystem.
+    // If format_if_mount_failed is set to true, SD card will be partitioned and
+    // formatted in case when mounting fails.
+    esp_vfs_fat_sdmmc_mount_config_t mount_config = {
+#ifdef CONFIG_EXAMPLE_FORMAT_IF_MOUNT_FAILED
+        .format_if_mount_failed = true,
+#else
+        .format_if_mount_failed = false,
+#endif // EXAMPLE_FORMAT_IF_MOUNT_FAILED
+        .max_files = 5,
+        .allocation_unit_size = 16 * 1024
+    };
+    // sdmmc_card_t *card;
+    // const char mount_point[] = MOUNT_POINT;
+    ESP_LOGI(TAG_SD, "Initializing SD card");
+
+    // Use settings defined above to initialize SD card and mount FAT filesystem.
+    // Note: esp_vfs_fat_sdmmc/sdspi_mount is all-in-one convenience functions.
+    // Please check its source code and implement error recovery when developing
+    // production applications.
+    ESP_LOGI(TAG_SD, "Using SPI peripheral");
+
+    sdmmc_host_t host = SDSPI_HOST_DEFAULT();
+    // spi_bus_config_t bus_cfg = {
+    //     .mosi_io_num = USER_SD_SPI_MOSI_GPIO,
+    //     .miso_io_num = USER_SD_SPI_MISO_GPIO,
+    //     .sclk_io_num = USER_SD_SPI_CLK_GPIO,
+    //     .quadwp_io_num = -1,
+    //     .quadhd_io_num = -1,
+    //     .max_transfer_sz = 4000,
+    // };
+    // ret = spi_bus_initialize(host.slot, &bus_cfg, SPI_DMA_CHAN);
+    // if (ret != ESP_OK) {
+    //     ESP_LOGE(TAG_SD, "Failed to initialize bus.");
+    //     return;
+    // }
+
+    // This initializes the slot without card detect (CD) and write protect (WP) signals.
+    // Modify slot_config.gpio_cd and slot_config.gpio_wp if your board has these signals.
+    sdspi_device_config_t slot_config = SDSPI_DEVICE_CONFIG_DEFAULT();
+    slot_config.gpio_cs = USER_SD_SPI_CS_GPIO;
+    slot_config.host_id = host.slot;
+
+    ESP_LOGI(TAG_SD, "Mounting filesystem");
+    ret = esp_vfs_fat_sdspi_mount(mount_point, &host, &slot_config, &mount_config, &card);
+
+    if (ret != ESP_OK) {
+        if (ret == ESP_FAIL) {
+            ESP_LOGE(TAG_SD, "Failed to mount filesystem. "
+                     "If you want the card to be formatted, set the EXAMPLE_FORMAT_IF_MOUNT_FAILED menuconfig option.");
+        } else {
+            ESP_LOGE(TAG_SD, "Failed to initialize the card (%s). "
+                     "Make sure SD card lines have pull-up resistors in place.", esp_err_to_name(ret));
+        }
+        return;
+    }
+    ESP_LOGI(TAG_SD, "Filesystem mounted");
+
+    // Card has been initialized, print its properties
+    sdmmc_card_print_info(stdout, card);
+
+}
+
+void sd_card_write(void) {
+    // First create a file.
+    const char *file_hello = MOUNT_POINT"/hello.txt";
+
+    ESP_LOGI(TAG_SD, "Opening file %s", file_hello);
+    FILE *f = fopen(file_hello, "w");
+    if (f == NULL) {
+        ESP_LOGE(TAG_SD, "Failed to open file for writing");
+        return;
+    }
+    fprintf(f, "Hello %s!\n", card->cid.name);
+    fclose(f);
+    ESP_LOGI(TAG_SD, "File written");
+}
+
+void sd_card_unmount(void) {
+
+    // All done, unmount partition and disable SPI peripheral
+    esp_vfs_fat_sdcard_unmount(mount_point, card);
+    ESP_LOGI(TAG_SD, "Card unmounted");
+
+    //deinitialize the bus after all devices are removed
+    spi_bus_free(host.slot);
+}
+
 void app_main(void)
 {
-    vTaskDelay(4000 / portTICK_PERIOD_MS);
+    vTaskDelay(2000 / portTICK_PERIOD_MS);
     ethernet_connect();
     while (!esp_ethernet_ready);  // ethernet이 준비되기까지 잠시 대기 
 
     mqtt_app_start();
     while (!esp_mqtt_ready);  // mqtt가 준비되기까지 잠시 대기
-    
-    xTaskCreatePinnedToCore(&blink_task, "blink_task", 8192, NULL, 5, NULL, APP_CPU_NUM);
-    xTaskCreatePinnedToCore(&period_task, "period_task", 8192, NULL, 5, NULL, PRO_CPU_NUM);
 
-    // while(1) {
-    //     vTaskDelay(10 / portTICK_PERIOD_MS);
-    // }
+    vTaskDelay(3000 / portTICK_PERIOD_MS);
+    // dev_info();
+
+    sd_card_mount();
+    // xTaskCreatePinnedToCore(&blink_task, "blink_task", 8192, NULL, 5, NULL, APP_CPU_NUM);
+    xTaskCreatePinnedToCore(&period_task, "period_task", 2048, NULL, 5, NULL, PRO_CPU_NUM);
+
+    while(1) {
+        sd_card_write();
+        vTaskDelay(1000 / portTICK_PERIOD_MS);
+    }
 }
