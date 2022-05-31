@@ -43,10 +43,13 @@
 #include "esp_vfs_fat.h"
 #include "sdmmc_cmd.h"
 
+#include <esp_http_client.h>
+
 
 static const char *TAG_ETH = "ethernet";
 static const char *TAG_MQTT = "mqtt";
 static const char *TAG_SD = "sd";
+static const char *TAG_HTTP = "http_client";
 
 int countX = 0;
 
@@ -55,7 +58,7 @@ int countX = 0;
 // #define USER_SD_SPI_MISO_GPIO 25
 // #define USER_SD_SPI_MOSI_GPIO 26
 // #define USER_SD_SPI_CLK_GPIO 27
-#define USER_SD_SPI_CS_GPIO 14
+#define USER_SD_SPI_CS_GPIO 18
 
 #define SPI_DMA_CHAN    1
 
@@ -350,44 +353,6 @@ static void mqtt_app_start(void)
     esp_mqtt_client_start(client_obj);
 }
 
-void period_task(void *pvParameter) { //
-    gpio_pad_select_gpio(USER_BLINK_GPIO);
-
-    gpio_set_direction(USER_BLINK_GPIO, GPIO_MODE_OUTPUT);
-    int cnt = 0;
-    while (1) {
-        if (esp_mqtt_ready) {  // mqtt 연결 문제 발생시 전송 일시 중단
-            cnt++;
-            char publish_data[100] = { 0x00, };
-            sprintf(publish_data, "publish data cnt : %d", cnt);
-            
-            gpio_set_level(USER_BLINK_GPIO, 1);
-            int msg_id = esp_mqtt_client_publish(client_obj, "/topic/haha", publish_data, 0, 1, 0);
-            gpio_set_level(USER_BLINK_GPIO, 0);
-            
-            vTaskDelay(5000 / portTICK_PERIOD_MS);
-        } else {
-            // ESP_LOGI(TAG_MQTT, "MQTT Not Ready");
-            vTaskDelay(1000 / portTICK_PERIOD_MS);    
-        }
-    }
-}
-
-void blink_task(void *pvParameter) {
-    gpio_pad_select_gpio(USER_BLINK_GPIO);
-
-    gpio_set_direction(USER_BLINK_GPIO, GPIO_MODE_OUTPUT);
-
-    while(1) {
-        gpio_set_level(USER_BLINK_GPIO, 1);
-        // printf("HIGH\n");
-        vTaskDelay(200 / portTICK_PERIOD_MS);
-        gpio_set_level(USER_BLINK_GPIO, 0);
-        // printf("LOW\n");
-        vTaskDelay(200 / portTICK_PERIOD_MS);
-    }
-}
-
 void dev_info(void) {
      
     // uint64_t chipid;
@@ -447,17 +412,13 @@ void sd_card_mount(void) {
     // If format_if_mount_failed is set to true, SD card will be partitioned and
     // formatted in case when mounting fails.
     esp_vfs_fat_sdmmc_mount_config_t mount_config = {
-#ifdef CONFIG_EXAMPLE_FORMAT_IF_MOUNT_FAILED
-        .format_if_mount_failed = true,
-#else
-        .format_if_mount_failed = false,
-#endif // EXAMPLE_FORMAT_IF_MOUNT_FAILED
+        .format_if_mount_failed = false,  // true인 경우 마운트 실패시 SD카드 포맷해버림
         .max_files = 5,
         .allocation_unit_size = 16 * 1024
     };
     // sdmmc_card_t *card;
     // const char mount_point[] = MOUNT_POINT;
-    ESP_LOGI(TAG_SD, "Initializing SD card");
+    ESP_LOGI(TAG_SD, "Initializing SD card %d", mount_config.format_if_mount_failed);
 
     // Use settings defined above to initialize SD card and mount FAT filesystem.
     // Note: esp_vfs_fat_sdmmc/sdspi_mount is all-in-one convenience functions.
@@ -466,6 +427,12 @@ void sd_card_mount(void) {
     ESP_LOGI(TAG_SD, "Using SPI peripheral");
 
     sdmmc_host_t host = SDSPI_HOST_DEFAULT();
+    /* ethernet 설정하면서 이미 SPI핀을 초기화함 
+     * 그래서 SD 카드 부분의 SPI 초기화를 제거하고 같은 핀을 사용하도록함
+     * 이미 같은 HSPI를 사용하기 때문에 다시 초기화시 에러가 발생함
+     * 여기서는 따로 초기화 하지 않고, CS만 설정해줌 (maybe...)
+     */
+
     // spi_bus_config_t bus_cfg = {
     //     .mosi_io_num = USER_SD_SPI_MOSI_GPIO,
     //     .miso_io_num = USER_SD_SPI_MISO_GPIO,
@@ -483,8 +450,8 @@ void sd_card_mount(void) {
     // This initializes the slot without card detect (CD) and write protect (WP) signals.
     // Modify slot_config.gpio_cd and slot_config.gpio_wp if your board has these signals.
     sdspi_device_config_t slot_config = SDSPI_DEVICE_CONFIG_DEFAULT();
-    slot_config.gpio_cs = USER_SD_SPI_CS_GPIO;
-    slot_config.host_id = host.slot;
+    slot_config.gpio_cs = USER_SD_SPI_CS_GPIO;  // 사용자 정의 SD_CS핀
+    slot_config.host_id = host.slot;  // HSPI_HOST
 
     ESP_LOGI(TAG_SD, "Mounting filesystem");
     ret = esp_vfs_fat_sdspi_mount(mount_point, &host, &slot_config, &mount_config, &card);
@@ -511,7 +478,7 @@ void sd_card_write(void) {
     const char *file_hello = MOUNT_POINT"/hello.txt";
 
     ESP_LOGI(TAG_SD, "Opening file %s", file_hello);
-    FILE *f = fopen(file_hello, "w");
+    FILE *f = fopen(file_hello, "a");
     if (f == NULL) {
         ESP_LOGE(TAG_SD, "Failed to open file for writing");
         return;
@@ -531,24 +498,129 @@ void sd_card_unmount(void) {
     spi_bus_free(host.slot);
 }
 
-void app_main(void)
+esp_err_t _http_event_handle(esp_http_client_event_t *evt)
 {
-    vTaskDelay(2000 / portTICK_PERIOD_MS);
+    switch(evt->event_id) {
+        case HTTP_EVENT_ERROR:
+            ESP_LOGI(TAG_HTTP, "HTTP_EVENT_ERROR");
+            break;
+        case HTTP_EVENT_ON_CONNECTED:
+            ESP_LOGI(TAG_HTTP, "HTTP_EVENT_ON_CONNECTED");
+            break;
+        case HTTP_EVENT_HEADER_SENT:
+            ESP_LOGI(TAG_HTTP, "HTTP_EVENT_HEADER_SENT");
+            break;
+        case HTTP_EVENT_ON_HEADER:
+            ESP_LOGI(TAG_HTTP, "HTTP_EVENT_ON_HEADER");
+            printf("%.*s", evt->data_len, (char*)evt->data);
+            break;
+        case HTTP_EVENT_ON_DATA:
+            ESP_LOGI(TAG_HTTP, "HTTP_EVENT_ON_DATA, len=%d", evt->data_len);
+            if (!esp_http_client_is_chunked_response(evt->client)) {
+                printf("%.*s\n", evt->data_len, (char*)evt->data);
+            }
+
+            break;
+        case HTTP_EVENT_ON_FINISH:
+            ESP_LOGI(TAG_HTTP, "HTTP_EVENT_ON_FINISH");
+            break;
+        case HTTP_EVENT_DISCONNECTED:
+            ESP_LOGI(TAG_HTTP, "HTTP_EVENT_DISCONNECTED");
+            break;
+    }
+    return ESP_OK;
+}
+
+void blink_task(void *pvParameter) {
+    gpio_pad_select_gpio(USER_BLINK_GPIO);
+
+    gpio_set_direction(USER_BLINK_GPIO, GPIO_MODE_OUTPUT);
+
+    int cnt = 0;
+
+    while(1) {
+        gpio_set_level(USER_BLINK_GPIO, 1);
+        // printf("HIGH\n");
+        vTaskDelay(500 / portTICK_PERIOD_MS);
+        gpio_set_level(USER_BLINK_GPIO, 0);
+        // printf("LOW\n");
+        vTaskDelay(500 / portTICK_PERIOD_MS);
+        cnt++;
+        if (cnt == 5) {
+            sd_card_write();
+            cnt = 0;
+        }
+    }
+}
+
+void mqtt_period_task(void *pvParameter) { //
+    gpio_pad_select_gpio(USER_BLINK_GPIO);
+
+    gpio_set_direction(USER_BLINK_GPIO, GPIO_MODE_OUTPUT);
+    int cnt = 0;
+    while (1) {
+        if (esp_mqtt_ready) {  // mqtt 연결 문제 발생시 전송 일시 중단
+            cnt++;
+            char publish_data[100] = { 0x00, };
+            sprintf(publish_data, "publish data cnt : %d", cnt);
+            
+            gpio_set_level(USER_BLINK_GPIO, 1);
+            // int msg_id = 
+            esp_mqtt_client_publish(client_obj, "/topic/haha", publish_data, 0, 1, 0);
+            gpio_set_level(USER_BLINK_GPIO, 0);
+            
+            vTaskDelay(5000 / portTICK_PERIOD_MS);
+        } else {
+            // ESP_LOGI(TAG_MQTT, "MQTT Not Ready");
+            vTaskDelay(1000 / portTICK_PERIOD_MS);    
+        }
+    }
+}
+
+void http_period_task(void *pvParameter) {
+    while(1) {
+        esp_http_client_config_t config = {
+            .url = "http://192.168.0.9:8000/post/",
+            // .url = "http://www.google.com/",
+            .event_handler = _http_event_handle,
+        };
+
+        char* post_data = "{\"str_data\" : \"string_data\",\"int_data\" : 12,\"float_data\" : 3.4} ";
+
+        esp_http_client_handle_t http_client = esp_http_client_init(&config);
+        // esp_http_client_set_method(http_client, HTTP_METHOD_GET);
+        esp_http_client_set_method(http_client, HTTP_METHOD_POST);
+        esp_http_client_set_header(http_client, "Content-Type", "application/json");
+        esp_http_client_set_post_field(http_client, post_data, strlen(post_data));
+        
+        esp_err_t err = esp_http_client_perform(http_client);
+
+        if (err == ESP_OK) {
+            ESP_LOGI(TAG_HTTP, "Status = %d, content_length = %d",
+            esp_http_client_get_status_code(http_client),
+            esp_http_client_get_content_length(http_client));
+        }
+
+        esp_http_client_cleanup(http_client);
+
+        vTaskDelay(10000 / portTICK_PERIOD_MS);
+    }
+}
+
+void app_main(void) {
     ethernet_connect();
     while (!esp_ethernet_ready);  // ethernet이 준비되기까지 잠시 대기 
 
-    mqtt_app_start();
-    while (!esp_mqtt_ready);  // mqtt가 준비되기까지 잠시 대기
+    // mqtt_app_start();
+    // while (!esp_mqtt_ready);  // mqtt가 준비되기까지 잠시 대기
 
-    vTaskDelay(3000 / portTICK_PERIOD_MS);
     // dev_info();
-
     sd_card_mount();
-    // xTaskCreatePinnedToCore(&blink_task, "blink_task", 8192, NULL, 5, NULL, APP_CPU_NUM);
-    xTaskCreatePinnedToCore(&period_task, "period_task", 2048, NULL, 5, NULL, PRO_CPU_NUM);
 
-    while(1) {
-        sd_card_write();
-        vTaskDelay(1000 / portTICK_PERIOD_MS);
-    }
+    xTaskCreatePinnedToCore(&blink_task, "blink_task", 2048, NULL, 5, NULL, APP_CPU_NUM);
+    // xTaskCreatePinnedToCore(&mqtt_period_task, "mqtt_period_task", 2048, NULL, 5, NULL, PRO_CPU_NUM);
+    xTaskCreatePinnedToCore(&http_period_task, "http_period_task", 8192, NULL, 5, NULL, PRO_CPU_NUM);
+
+    // while(1) {
+    // }
 }
