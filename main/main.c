@@ -625,8 +625,8 @@ void app_main(void) {
     printf("Minimum free heap size: %d bytes\n", esp_get_minimum_free_heap_size());
 
     vTaskDelay(1000 / portTICK_PERIOD_MS);
-    
-    ethernet_connect();
+
+    ethernet_connect(); 
     while (!esp_ethernet_ready);  // ethernet이 준비되기까지 잠시 대기 
 
     // mqtt_app_start();
