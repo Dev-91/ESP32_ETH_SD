@@ -614,7 +614,7 @@ void app_main(void) {
     printf("This is %s chip with %d CPU core(s), WiFi%s%s, ",
             CONFIG_IDF_TARGET,
             chip_info.cores,
-            (chip_info.features & CHIP_FEATURE_BT) ? "/BT" : "",
+            (chip_info.features & CHIP_FEATURE_BT) ? "/BT" : "", 
             (chip_info.features & CHIP_FEATURE_BLE) ? "/BLE" : ""); 
 
     printf("silicon revision %d, ", chip_info.revision);
