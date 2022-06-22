@@ -1,30 +1,21 @@
 #include <stdio.h>
 #include <string.h>
-#include "freertos/FreeRTOS.h"
-#include "freertos/task.h"
+#include <stdint.h>
+#include <stddef.h>
+
+#include "esp_system.h"
+#include "esp_spi_flash.h"
 #include "esp_netif.h"
 #include "esp_eth.h"
 #include "esp_event.h"
 #include "esp_log.h"
+#include "esp_vfs_fat.h"
+
 #include "driver/gpio.h"
-#include "sdkconfig.h"
-#if CONFIG_ETH_USE_SPI_ETHERNET
 #include "driver/spi_master.h"
-#endif // CONFIG_ETH_USE_SPI_ETHERNET
 
-// #include <stdio.h>
-#include <stdint.h>
-#include <stddef.h>
-// #include <string.h>
-// #include "esp_wifi.h"
-#include "esp_system.h"
-#include "nvs_flash.h"
-// #include "esp_event.h"
-// #include "esp_netif.h"
-// #include "protocol_examples_common.h"
-
-// #include "freertos/FreeRTOS.h"
-// #include "freertos/task.h"
+#include "freertos/FreeRTOS.h"
+#include "freertos/task.h"
 #include "freertos/semphr.h"
 #include "freertos/queue.h"
 
@@ -32,19 +23,16 @@
 #include "lwip/dns.h"
 #include "lwip/netdb.h"
 
-// #include "esp_log.h"
 #include "mqtt_client.h"
-
 #include "math.h"
+#include "sdmmc_cmd.h"
+#include "nvs_flash.h"
+#include "sdkconfig.h"
 
-#include <string.h>
 #include <sys/unistd.h>
 #include <sys/stat.h>
-#include "esp_vfs_fat.h"
-#include "sdmmc_cmd.h"
 
 #include <esp_http_client.h>
-
 
 static const char *TAG_ETH = "ethernet";
 static const char *TAG_MQTT = "mqtt";
@@ -354,34 +342,31 @@ static void mqtt_app_start(void)
 }
 
 void dev_info(void) {
-     
-    // uint64_t chipid;
-    
-    // chipid=ESP.getEfuseMac(); // The chip ID is essentially its MAC address(length: 6 bytes)
-    // printf("ESP32 Chip ID = %04X", (uint16_t)(chipid>>32)); // print High 2 bytes
-    // printf("%08X\n", (uint32_t)chipid); // print Low 4bytes
-    // printf("---------------------------------\n");
-     
-    // printf("Chip Revision %d\n", ESP.getChipRevision());
-    
+    /* Print chip information */
     static const char *TAG_INFO = "chip_info";
     esp_chip_info_t chip_info;
+    
+    esp_chip_info(&chip_info);
+
+    ESP_LOGI(TAG_INFO, "This is %s chip with %d CPU core(s)",
+            CONFIG_IDF_TARGET, chip_info.cores); 
+
+    ESP_LOGI(TAG_INFO, "WiFi%s%s",
+            (chip_info.features & CHIP_FEATURE_BT) ? "/BT" : "", 
+            (chip_info.features & CHIP_FEATURE_BLE) ? "/BLE" : ""); 
+
+    ESP_LOGI(TAG_INFO, "silicon revision %d, ", chip_info.revision);
+
+    ESP_LOGI(TAG_INFO, "%dMB %s flash\n", spi_flash_get_chip_size() / (1024 * 1024),
+            (chip_info.features & CHIP_FEATURE_EMB_FLASH) ? "embedded" : "external");
+
+    ESP_LOGI(TAG_INFO, "Minimum free heap size: %d bytes\n", esp_get_minimum_free_heap_size());
     
     esp_chip_info(&chip_info);
     ESP_LOGI(TAG_INFO, "Number of Core: %d", chip_info.cores);
     ESP_LOGI(TAG_INFO, "CHIP Revision Number: %d", chip_info.revision); 
      
-    // ESP_LOGI(TAG_INFO, "Flash Chip Size = %d byte", ESP.getFlashChipSize());
-    // ESP_LOGI(TAG_INFO, "Flash Frequency = %d Hz", ESP.getFlashChipSpeed());
-    // ESP_LOGI(TAG_INFO, "");
-     
     ESP_LOGI(TAG_INFO, "ESP-IDF version = %s", esp_get_idf_version());
-     
-    // ESP_LOGI(TAG_INFO, "Total Heap Size = %d", ESP.getHeapSize());
-    // ESP_LOGI(TAG_INFO, "Free Heap Size = %d", ESP.getFreeHeap());
-    // ESP_LOGI(TAG_INFO, "Lowest Free Heap Size = %d", ESP.getMinFreeHeap());
-    // ESP_LOGI(TAG_INFO, "Largest Heap Block = %d", ESP.getMaxAllocHeap());
-    // ESP_LOGI(TAG_INFO, "");
      
     uint8_t mac0[6];
     esp_efuse_mac_get_default(mac0);
@@ -512,12 +497,12 @@ esp_err_t _http_event_handle(esp_http_client_event_t *evt)
             break;
         case HTTP_EVENT_ON_HEADER:
             ESP_LOGI(TAG_HTTP, "HTTP_EVENT_ON_HEADER");
-            printf("%.*s", evt->data_len, (char*)evt->data);
+            ESP_LOGI(TAG_HTTP, "%.*s", evt->data_len, (char*)evt->data);
             break;
         case HTTP_EVENT_ON_DATA:
             ESP_LOGI(TAG_HTTP, "HTTP_EVENT_ON_DATA, len=%d", evt->data_len);
             if (!esp_http_client_is_chunked_response(evt->client)) {
-                printf("%.*s\n", evt->data_len, (char*)evt->data);
+                ESP_LOGI(TAG_HTTP, "%.*s\n", evt->data_len, (char*)evt->data);
             }
 
             break;
@@ -536,15 +521,26 @@ void blink_task(void *pvParameter) {
 
     gpio_set_direction(USER_BLINK_GPIO, GPIO_MODE_OUTPUT);
 
+    gpio_config_t io_conf;
+    //disable interrupt
+    io_conf.intr_type = GPIO_PIN_INTR_DISABLE;
+    //set as output mode
+    io_conf.mode = GPIO_MODE_OUTPUT;
+    //bit mask of the pins that you want to set,e.g.GPIO18/19
+    io_conf.pin_bit_mask = 1ULL<<USER_BLINK_GPIO;
+    //disable pull-down mode
+    io_conf.pull_down_en = 0;
+    //disable pull-up mode
+    io_conf.pull_up_en = 0;
+    //configure GPIO with the given settings
+    gpio_config(&io_conf);
+
     int cnt = 0;
 
     while(1) {
-        gpio_set_level(USER_BLINK_GPIO, 1);
-        // printf("HIGH\n");
-        vTaskDelay(500 / portTICK_PERIOD_MS);
-        gpio_set_level(USER_BLINK_GPIO, 0);
-        // printf("LOW\n");
-        vTaskDelay(500 / portTICK_PERIOD_MS);
+        gpio_set_level(USER_BLINK_GPIO, cnt % 2);
+        vTaskDelay(1000 / portTICK_PERIOD_MS);
+
         cnt++;
         if (cnt == 5) {
             sd_card_write();
@@ -553,10 +549,14 @@ void blink_task(void *pvParameter) {
     }
 }
 
-void mqtt_period_task(void *pvParameter) { //
+void mqtt_period_task(void *pvParameter) {
     gpio_pad_select_gpio(USER_BLINK_GPIO);
 
     gpio_set_direction(USER_BLINK_GPIO, GPIO_MODE_OUTPUT);
+
+    mqtt_app_start();
+    while (!esp_mqtt_ready);  // mqtt가 준비되기까지 잠시 대기
+    
     int cnt = 0;
     while (1) {
         if (esp_mqtt_ready) {  // mqtt 연결 문제 발생시 전송 일시 중단
@@ -565,14 +565,14 @@ void mqtt_period_task(void *pvParameter) { //
             sprintf(publish_data, "publish data cnt : %d", cnt);
             
             gpio_set_level(USER_BLINK_GPIO, 1);
-            // int msg_id = 
+            
             esp_mqtt_client_publish(client_obj, "/topic/haha", publish_data, 0, 1, 0);
             gpio_set_level(USER_BLINK_GPIO, 0);
             
             vTaskDelay(5000 / portTICK_PERIOD_MS);
         } else {
             // ESP_LOGI(TAG_MQTT, "MQTT Not Ready");
-            vTaskDelay(1000 / portTICK_PERIOD_MS);    
+            vTaskDelay(1000 / portTICK_PERIOD_MS);
         }
     }
 }
@@ -608,37 +608,18 @@ void http_period_task(void *pvParameter) {
 }
 
 void app_main(void) {
-    /* Print chip information */
-    esp_chip_info_t chip_info;
-    esp_chip_info(&chip_info);
-    printf("This is %s chip with %d CPU core(s), WiFi%s%s, ",
-            CONFIG_IDF_TARGET,
-            chip_info.cores,
-            (chip_info.features & CHIP_FEATURE_BT) ? "/BT" : "", 
-            (chip_info.features & CHIP_FEATURE_BLE) ? "/BLE" : ""); 
+    dev_info();
 
-    printf("silicon revision %d, ", chip_info.revision);
-
-    printf("%dMB %s flash\n", spi_flash_get_chip_size() / (1024 * 1024),
-            (chip_info.features & CHIP_FEATURE_EMB_FLASH) ? "embedded" : "external");
-
-    printf("Minimum free heap size: %d bytes\n", esp_get_minimum_free_heap_size());
-
-    vTaskDelay(1000 / portTICK_PERIOD_MS);
-
-    ethernet_connect(); 
+    ethernet_connect();
     while (!esp_ethernet_ready);  // ethernet이 준비되기까지 잠시 대기 
 
-    // mqtt_app_start();
-    // while (!esp_mqtt_ready);  // mqtt가 준비되기까지 잠시 대기
-
-    // dev_info();
     sd_card_mount();
 
     xTaskCreatePinnedToCore(&blink_task, "blink_task", 2048, NULL, 5, NULL, APP_CPU_NUM);
-    // xTaskCreatePinnedToCore(&mqtt_period_task, "mqtt_period_task", 2048, NULL, 5, NULL, PRO_CPU_NUM);
+    xTaskCreatePinnedToCore(&mqtt_period_task, "mqtt_period_task", 2048, NULL, 5, NULL, PRO_CPU_NUM);
     xTaskCreatePinnedToCore(&http_period_task, "http_period_task", 8192, NULL, 5, NULL, PRO_CPU_NUM);
 
-    // while(1) {
-    // }
+    while(1) {
+        vTaskDelay(10 / portTICK_PERIOD_MS);
+    }
 }

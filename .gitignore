@@ -4,3 +4,4 @@ build
 Kconfig.projbuild
 sdkconfig
 sdkconfig.old
+debug.log
