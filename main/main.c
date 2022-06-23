@@ -13,6 +13,7 @@
 
 #include "driver/gpio.h"
 #include "driver/spi_master.h"
+#include "driver/timer.h"
 
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
@@ -41,6 +42,9 @@ static const char *TAG_HTTP = "http_client";
 
 int countX = 0;
 
+#define TIMER_DIVIDER         (16)  //  Hardware timer clock divider
+#define TIMER_SCALE           (TIMER_BASE_CLK / TIMER_DIVIDER)  // convert counter value to seconds
+
 #define USER_BLINK_GPIO 23
 
 // #define USER_SD_SPI_MISO_GPIO 25
@@ -55,6 +59,23 @@ int countX = 0;
 sdmmc_card_t *card;
 const char mount_point[] = MOUNT_POINT;
 sdmmc_host_t host = SDSPI_HOST_DEFAULT();
+
+typedef struct {
+    int timer_group;
+    int timer_idx;
+    int alarm_interval;
+    bool auto_reload;
+} timer_info_t;
+
+typedef struct {
+    timer_info_t info;
+    uint64_t timer_counter_value;
+} timer_event_t;
+
+static xQueueHandle s_timer_queue;
+static xQueueHandle http_timer_queue;
+static xQueueHandle mqtt_timer_queue;
+
 // #define CONFIG_USER_SPI_ETHERNETS_NUM 1
 // #define CONFIG_USER_ETH_SPI_HOST 1
 // #define CONFIG_USER_ETH_SPI_CLOCK_MHZ 12
@@ -483,8 +504,7 @@ void sd_card_unmount(void) {
     spi_bus_free(host.slot);
 }
 
-esp_err_t _http_event_handle(esp_http_client_event_t *evt)
-{
+esp_err_t _http_event_handle(esp_http_client_event_t *evt) {
     switch(evt->event_id) {
         case HTTP_EVENT_ERROR:
             ESP_LOGI(TAG_HTTP, "HTTP_EVENT_ERROR");
@@ -514,6 +534,88 @@ esp_err_t _http_event_handle(esp_http_client_event_t *evt)
             break;
     }
     return ESP_OK;
+}
+
+static bool IRAM_ATTR timer_group_isr_callback(void *args) {
+    // timer_spinlock_take(TIMER_GROUP_0);
+    BaseType_t high_task_awoken = pdFALSE;
+    timer_info_t *info = (timer_info_t *) args;
+
+    uint64_t timer_counter_value = timer_group_get_counter_value_in_isr(info->timer_group, info->timer_idx);
+
+    /* Prepare basic event data that will be then sent back to task */
+    timer_event_t evt = {
+        .info.timer_group = info->timer_group,
+        .info.timer_idx = info->timer_idx,
+        .info.auto_reload = info->auto_reload,
+        .info.alarm_interval = info->alarm_interval,
+        .timer_counter_value = timer_counter_value
+    };
+
+    if (!info->auto_reload) { // auto_reload가 아닐때
+        timer_counter_value += info->alarm_interval * TIMER_SCALE;
+        timer_group_set_alarm_value_in_isr(info->timer_group, info->timer_idx, timer_counter_value);
+    }
+
+    /* Now just send the event data back to the main program task */
+    if (info->timer_group == TIMER_GROUP_0) {
+        if (info->timer_idx == TIMER_0) {
+            xQueueSendFromISR(s_timer_queue, &evt, &high_task_awoken);
+        } else if (info->timer_idx == TIMER_1) {
+            
+        }
+    } else if (info->timer_group == TIMER_GROUP_1) {
+        if (info->timer_idx == TIMER_0) {
+            xQueueSendFromISR(http_timer_queue, &evt, &high_task_awoken);
+        } else if (info->timer_idx == TIMER_1) {
+            xQueueSendFromISR(mqtt_timer_queue, &evt, &high_task_awoken);
+        }
+    }
+    
+    
+    // if (timer_intr & TIMER_INTR_T0) {
+    //     xQueueSendFromISR(s_timer_queue, &evt, &high_task_awoken);
+    // } else if (timer_intr & TIMER_INTR_T1) {
+    //     xQueueSendFromISR(http_timer_queue, &evt, &high_task_awoken);
+    // }
+    // timer_spinlock_give(TIMER_GROUP_0);
+
+    return high_task_awoken == pdTRUE; // return whether we need to yield at the end of ISR
+}
+
+static void tg_timer_init(int group, int timer, bool auto_reload, int timer_interval_sec) {
+    /* Select and initialize basic parameters of the timer */
+    timer_config_t config = {
+        .divider = TIMER_DIVIDER,
+        .counter_dir = TIMER_COUNT_UP,
+        .counter_en = TIMER_PAUSE,
+        .alarm_en = TIMER_ALARM_EN,
+        .auto_reload = auto_reload,
+    }; // default clock source is APB
+    timer_init(group, timer, &config);
+
+    /* Timer's counter will initially start from value below.
+       Also, if auto_reload is set, this value will be automatically reload on alarm */
+    timer_set_counter_value(group, timer, 0);
+
+    /* Configure the alarm value and the interrupt on alarm. */
+    timer_set_alarm_value(group, timer, timer_interval_sec * TIMER_SCALE);
+    timer_enable_intr(group, timer);
+
+    timer_info_t *timer_info = calloc(1, sizeof(timer_info_t));
+    timer_info->timer_group = group;
+    timer_info->timer_idx = timer;
+    timer_info->auto_reload = auto_reload;
+    timer_info->alarm_interval = timer_interval_sec;
+    timer_isr_callback_add(group, timer, timer_group_isr_callback, timer_info, 0);
+
+    timer_start(group, timer);
+}
+
+static void inline print_timer_counter(uint64_t counter_value) {
+    printf("Counter: 0x%08x%08x\r\n", (uint32_t) (counter_value >> 32),
+           (uint32_t) (counter_value));
+    printf("Time   : %.8f s\r\n", (double) counter_value / TIMER_SCALE);
 }
 
 void blink_task(void *pvParameter) {
@@ -549,7 +651,32 @@ void blink_task(void *pvParameter) {
     }
 }
 
-void mqtt_period_task(void *pvParameter) {
+static void timer_task(void *pvParameter) {
+    while(1) {
+        timer_event_t evt;
+        xQueueReceive(s_timer_queue, &evt, portMAX_DELAY);
+
+        /* Print information that the timer reported an event */
+        if (evt.info.auto_reload) {
+            printf("Timer Group with auto reload\n");
+        } else {
+            printf("Timer Group without auto reload\n");
+        }
+        printf("Group[%d], timer[%d] alarm event\n", evt.info.timer_group, evt.info.timer_idx);
+
+        /* Print the timer values passed by event */
+        printf("------- EVENT TIME --------\n");
+        print_timer_counter(evt.timer_counter_value);
+
+        /* Print the timer values as visible by this task */
+        printf("-------- TASK TIME --------\n");
+        uint64_t task_counter_value;
+        timer_get_counter_value(evt.info.timer_group, evt.info.timer_idx, &task_counter_value);
+        print_timer_counter(task_counter_value);
+    }
+}
+
+void mqtt_timer_task(void *pvParameter) {
     gpio_pad_select_gpio(USER_BLINK_GPIO);
 
     gpio_set_direction(USER_BLINK_GPIO, GPIO_MODE_OUTPUT);
@@ -558,7 +685,22 @@ void mqtt_period_task(void *pvParameter) {
     while (!esp_mqtt_ready);  // mqtt가 준비되기까지 잠시 대기
     
     int cnt = 0;
-    while (1) {
+    while(1) {
+        timer_event_t evt;
+        xQueueReceive(mqtt_timer_queue, &evt, portMAX_DELAY);
+
+        /* Print information that the timer reported an event */
+        // if (evt.info.auto_reload) {
+        //     printf("Timer Group with auto reload\n");
+        // } else {
+        //     printf("Timer Group without auto reload\n");
+        // }
+        // printf("Group[%d], timer[%d] alarm event\n", evt.info.timer_group, evt.info.timer_idx);
+
+        /* Print the timer values passed by event */
+        // printf("------- MQTT EVENT TIME --------\n");
+        // print_timer_counter(evt.timer_counter_value);
+
         if (esp_mqtt_ready) {  // mqtt 연결 문제 발생시 전송 일시 중단
             cnt++;
             char publish_data[100] = { 0x00, };
@@ -568,17 +710,33 @@ void mqtt_period_task(void *pvParameter) {
             
             esp_mqtt_client_publish(client_obj, "/topic/haha", publish_data, 0, 1, 0);
             gpio_set_level(USER_BLINK_GPIO, 0);
-            
-            vTaskDelay(5000 / portTICK_PERIOD_MS);
-        } else {
-            // ESP_LOGI(TAG_MQTT, "MQTT Not Ready");
-            vTaskDelay(1000 / portTICK_PERIOD_MS);
         }
+
+        /* Print the timer values as visible by this task */
+        // printf("-------- MQTT TASK TIME --------\n");
+        // uint64_t task_counter_value;
+        // timer_get_counter_value(evt.info.timer_group, evt.info.timer_idx, &task_counter_value);
+        // print_timer_counter(task_counter_value);
     }
 }
 
-void http_period_task(void *pvParameter) {
+void http_timer_task(void *pvParameter) {
     while(1) {
+        timer_event_t evt;
+        xQueueReceive(http_timer_queue, &evt, portMAX_DELAY);
+
+        /* Print information that the timer reported an event */
+        // if (evt.info.auto_reload) {
+        //     printf("Timer Group with auto reload\n");
+        // } else {
+        //     printf("Timer Group without auto reload\n");
+        // }
+        // printf("Group[%d], timer[%d] alarm event\n", evt.info.timer_group, evt.info.timer_idx);
+
+        // /* Print the timer values passed by event */
+        // printf("------- HTTP EVENT TIME --------\n");
+        // print_timer_counter(evt.timer_counter_value);
+
         esp_http_client_config_t config = {
             .url = "http://192.168.0.9:8000/post/",
             // .url = "http://www.google.com/",
@@ -603,7 +761,11 @@ void http_period_task(void *pvParameter) {
 
         esp_http_client_cleanup(http_client);
 
-        vTaskDelay(10000 / portTICK_PERIOD_MS);
+        /* Print the timer values as visible by this task */
+        // printf("-------- HTTP TASK TIME --------\n");
+        // uint64_t task_counter_value;
+        // timer_get_counter_value(evt.info.timer_group, evt.info.timer_idx, &task_counter_value);
+        // print_timer_counter(task_counter_value);
     }
 }
 
@@ -611,15 +773,21 @@ void app_main(void) {
     dev_info();
 
     ethernet_connect();
-    while (!esp_ethernet_ready);  // ethernet이 준비되기까지 잠시 대기 
+    while (!esp_ethernet_ready) {
+        vTaskDelay(10 / portTICK_PERIOD_MS); // task_wdt 
+    };  // ethernet이 준비되기까지 잠시 대기 
 
     sd_card_mount();
 
-    xTaskCreatePinnedToCore(&blink_task, "blink_task", 2048, NULL, 5, NULL, APP_CPU_NUM);
-    xTaskCreatePinnedToCore(&mqtt_period_task, "mqtt_period_task", 2048, NULL, 5, NULL, PRO_CPU_NUM);
-    xTaskCreatePinnedToCore(&http_period_task, "http_period_task", 8192, NULL, 5, NULL, PRO_CPU_NUM);
+    s_timer_queue = xQueueCreate(10, sizeof(timer_event_t));
+    http_timer_queue = xQueueCreate(10, sizeof(timer_event_t));
+    mqtt_timer_queue = xQueueCreate(10, sizeof(timer_event_t));
+    tg_timer_init(TIMER_GROUP_0, TIMER_0, true, 10);
+    tg_timer_init(TIMER_GROUP_1, TIMER_0, true, 5);
+    tg_timer_init(TIMER_GROUP_1, TIMER_1, true, 2);
 
-    while(1) {
-        vTaskDelay(10 / portTICK_PERIOD_MS);
-    }
+    // xTaskCreatePinnedToCore(&blink_task, "blink_task", 2048, NULL, 5, NULL, APP_CPU_NUM);
+    xTaskCreatePinnedToCore(&timer_task, "timer_task", 2048, NULL, 1, NULL, APP_CPU_NUM);
+    xTaskCreatePinnedToCore(&mqtt_timer_task, "mqtt_timer_task", 2048, NULL, 3, NULL, PRO_CPU_NUM);
+    xTaskCreatePinnedToCore(&http_timer_task, "http_timer_task", 8192, NULL, 5, NULL, PRO_CPU_NUM);
 }
