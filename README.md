@@ -18,6 +18,7 @@ ESP32 사용해서 이것저것 테스트 중...
 Chip : ESP32-WROOM-32D
 Ethernet : W5500io (W5500칩 기반 모듈)
 micor SD : SPI 방식 사용
+Debuger : ESP-Prog
 ```
 
 
