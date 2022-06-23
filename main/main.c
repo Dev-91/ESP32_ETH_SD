@@ -47,12 +47,18 @@ int countX = 0;
 
 #define USER_BLINK_GPIO 23
 
-// #define USER_SD_SPI_MISO_GPIO 25
-// #define USER_SD_SPI_MOSI_GPIO 26
-// #define USER_SD_SPI_CLK_GPIO 27
+#define USER_SPI_MISO_GPIO 25
+#define USER_SPI_MOSI_GPIO 26
+#define USER_SPI_SCLK_GPIO 27
+
 #define USER_SD_SPI_CS_GPIO 18
 
-#define SPI_DMA_CHAN    1
+#define USER_ETH_SPI_CS_GPIO 19
+#define USER_ETH_SPI_INT_GPIO 4
+#define USER_ETH_SPI_PHY_RST_GPIO -1
+#define USER_ETH_SPI_PHY_ADDR_GPIO 1
+
+#define SPI_DMA_CHAN 1
 
 #define MOUNT_POINT "/sdcard"
 
@@ -76,32 +82,19 @@ static xQueueHandle s_timer_queue;
 static xQueueHandle http_timer_queue;
 static xQueueHandle mqtt_timer_queue;
 
-// #define CONFIG_USER_SPI_ETHERNETS_NUM 1
-// #define CONFIG_USER_ETH_SPI_HOST 1
-// #define CONFIG_USER_ETH_SPI_CLOCK_MHZ 12
+#define USER_SPI_ETHERNETS_NUM 1
+#define USER_ETH_SPI_HOST 1
+#define USER_ETH_SPI_CLOCK_MHZ 12
 
-// #define CONFIG_USER_ETH_SPI_CS0_GPIO 15
-// #define CONFIG_USER_ETH_SPI_INT0_GPIO 1
-// #define CONFIG_USER_ETH_SPI_PHY_RST0_GPIO -1
-// #define CONFIG_USER_ETH_SPI_PHY_ADDR0 1
-
-// #define CONFIG_USER_USE_SPI_ETHERNET true
-// #define CONFIG_USER_USE_W5500 true
+#define USER_USE_SPI_ETHERNET true
+#define USER_USE_W5500 true
 
 esp_mqtt_client_handle_t client_obj;
 
 bool esp_ethernet_ready = false;
 bool esp_mqtt_ready = false;
 
-#if CONFIG_USER_USE_SPI_ETHERNET
-#define INIT_SPI_ETH_MODULE_CONFIG(eth_module_config, num)                                  \
-    do {                                                                                    \
-        eth_module_config[num].spi_cs_gpio = CONFIG_USER_ETH_SPI_CS ##num## _GPIO;          \
-        eth_module_config[num].int_gpio = CONFIG_USER_ETH_SPI_INT ##num## _GPIO;            \
-        eth_module_config[num].phy_reset_gpio = CONFIG_USER_ETH_SPI_PHY_RST ##num## _GPIO;  \
-        eth_module_config[num].phy_addr = CONFIG_USER_ETH_SPI_PHY_ADDR ##num;               \
-    } while(0)
-
+#if USER_USE_SPI_ETHERNET
 typedef struct{
     uint8_t spi_cs_gpio;
     uint8_t int_gpio;
@@ -165,18 +158,18 @@ void ethernet_connect(void)
     // Create default event loop that running in background
     ESP_ERROR_CHECK(esp_event_loop_create_default());
 
-#if CONFIG_USER_USE_SPI_ETHERNET
+#if USER_USE_SPI_ETHERNET
     // Create instance(s) of esp-netif for SPI Ethernet(s)
     esp_netif_inherent_config_t esp_netif_config = ESP_NETIF_INHERENT_DEFAULT_ETH();
     esp_netif_config_t cfg_spi = {
         .base = &esp_netif_config,
         .stack = ESP_NETIF_NETSTACK_DEFAULT_ETH
     };
-    esp_netif_t *eth_netif_spi[CONFIG_USER_SPI_ETHERNETS_NUM] = { NULL };
+    esp_netif_t *eth_netif_spi[USER_SPI_ETHERNETS_NUM] = { NULL };
     char if_key_str[10];
     char if_desc_str[10];
     char num_str[3];
-    for (int i = 0; i < CONFIG_USER_SPI_ETHERNETS_NUM; i++) {
+    for (int i = 0; i < USER_SPI_ETHERNETS_NUM; i++) {
         itoa(i, num_str, 10);
         strcat(strcpy(if_key_str, "ETH_SPI_"), num_str);
         strcat(strcpy(if_desc_str, "eth"), num_str);
@@ -194,43 +187,48 @@ void ethernet_connect(void)
     gpio_install_isr_service(0);
 
     // Init SPI bus
-    spi_device_handle_t spi_handle[CONFIG_USER_SPI_ETHERNETS_NUM] = { NULL };
+    spi_device_handle_t spi_handle[USER_SPI_ETHERNETS_NUM] = { NULL };
     spi_bus_config_t buscfg = {
-        .miso_io_num = CONFIG_USER_ETH_SPI_MISO_GPIO,
-        .mosi_io_num = CONFIG_USER_ETH_SPI_MOSI_GPIO,
-        .sclk_io_num = CONFIG_USER_ETH_SPI_SCLK_GPIO,
+        .miso_io_num = USER_SPI_MISO_GPIO,
+        .mosi_io_num = USER_SPI_MOSI_GPIO,
+        .sclk_io_num = USER_SPI_SCLK_GPIO,
         .quadwp_io_num = -1,
         .quadhd_io_num = -1,
         .max_transfer_sz = 4000,
     };
-    ESP_ERROR_CHECK(spi_bus_initialize(CONFIG_USER_ETH_SPI_HOST, &buscfg, SPI_DMA_CH_AUTO));
+    ESP_ERROR_CHECK(spi_bus_initialize(USER_ETH_SPI_HOST, &buscfg, SPI_DMA_CH_AUTO));
 
     // Init specific SPI Ethernet module configuration from Kconfig (CS GPIO, Interrupt GPIO, etc.)
-    spi_eth_module_config_t spi_eth_module_config[CONFIG_USER_SPI_ETHERNETS_NUM];
-    INIT_SPI_ETH_MODULE_CONFIG(spi_eth_module_config, 0);
+    spi_eth_module_config_t spi_eth_module_config[USER_SPI_ETHERNETS_NUM];
+    // INIT_SPI_ETH_MODULE_CONFIG(spi_eth_module_config, 0);
 
-// #if CONFIG_USER_SPI_ETHERNETS_NUM > 1
-//     INIT_SPI_ETH_MODULE_CONFIG(spi_eth_module_config, 1);
-// #endif
+    spi_eth_module_config[0].spi_cs_gpio = USER_ETH_SPI_CS_GPIO;
+    spi_eth_module_config[0].int_gpio = USER_ETH_SPI_INT_GPIO;
+    spi_eth_module_config[0].phy_reset_gpio = USER_ETH_SPI_PHY_RST_GPIO;
+    spi_eth_module_config[0].phy_addr = USER_ETH_SPI_PHY_ADDR_GPIO;
+
+    // #if USER_SPI_ETHERNETS_NUM > 1
+    //     INIT_SPI_ETH_MODULE_CONFIG(spi_eth_module_config, 1);
+    // #endif
     // Configure SPI interface and Ethernet driver for specific SPI module
-    esp_eth_mac_t *mac_spi[CONFIG_USER_SPI_ETHERNETS_NUM];
-    esp_eth_phy_t *phy_spi[CONFIG_USER_SPI_ETHERNETS_NUM];
-    esp_eth_handle_t eth_handle_spi[CONFIG_USER_SPI_ETHERNETS_NUM] = { NULL };
+    esp_eth_mac_t *mac_spi[USER_SPI_ETHERNETS_NUM];
+    esp_eth_phy_t *phy_spi[USER_SPI_ETHERNETS_NUM];
+    esp_eth_handle_t eth_handle_spi[USER_SPI_ETHERNETS_NUM] = { NULL };
 
-#if CONFIG_USER_USE_W5500
+#if USER_USE_W5500
     spi_device_interface_config_t devcfg = {
         .command_bits = 16, // Actually it's the address phase in W5500 SPI frame
         .address_bits = 8,  // Actually it's the control phase in W5500 SPI frame
         .mode = 0,
-        .clock_speed_hz = CONFIG_USER_ETH_SPI_CLOCK_MHZ * 1000 * 1000,
+        .clock_speed_hz = USER_ETH_SPI_CLOCK_MHZ * 1000 * 1000,
         .queue_size = 20
     };
 
-    for (int i = 0; i < CONFIG_USER_SPI_ETHERNETS_NUM; i++) {
+    for (int i = 0; i < USER_SPI_ETHERNETS_NUM; i++) {
         // Set SPI module Chip Select GPIO
         devcfg.spics_io_num = spi_eth_module_config[i].spi_cs_gpio;
 
-        ESP_ERROR_CHECK(spi_bus_add_device(CONFIG_USER_ETH_SPI_HOST, &devcfg, &spi_handle[i]));
+        ESP_ERROR_CHECK(spi_bus_add_device(USER_ETH_SPI_HOST, &devcfg, &spi_handle[i]));
         // w5500 ethernet driver is based on spi driver
         eth_w5500_config_t w5500_config = ETH_W5500_DEFAULT_CONFIG(spi_handle[i]);
 
@@ -247,9 +245,9 @@ void ethernet_connect(void)
         mac_spi[i] = esp_eth_mac_new_w5500(&w5500_config, &mac_config_spi);
         phy_spi[i] = esp_eth_phy_new_w5500(&phy_config_spi);
     }
-#endif //CONFIG_USER_USE_W5500
+#endif //USER_USE_W5500
 
-    for (int i = 0; i < CONFIG_USER_SPI_ETHERNETS_NUM; i++) {
+    for (int i = 0; i < USER_SPI_ETHERNETS_NUM; i++) {
         esp_eth_config_t eth_config_spi = ETH_DEFAULT_CONFIG(mac_spi[i], phy_spi[i]);
         ESP_ERROR_CHECK(esp_eth_driver_install(&eth_config_spi, &eth_handle_spi[i]));
 
@@ -270,11 +268,11 @@ void ethernet_connect(void)
     ESP_ERROR_CHECK(esp_event_handler_register(IP_EVENT, IP_EVENT_ETH_GOT_IP, &got_ip_event_handler, NULL));
 
     /* start Ethernet driver state machine */
-#if CONFIG_USER_USE_SPI_ETHERNET
-    for (int i = 0; i < CONFIG_USER_SPI_ETHERNETS_NUM; i++) {
+#if USER_USE_SPI_ETHERNET
+    for (int i = 0; i < USER_SPI_ETHERNETS_NUM; i++) {
         ESP_ERROR_CHECK(esp_eth_start(eth_handle_spi[i]));
     }
-#endif // CONFIG_USER_USE_SPI_ETHERNET
+#endif // USER_USE_SPI_ETHERNET
 }
 
 void mqtt_data_parser(esp_mqtt_event_handle_t event) {
@@ -475,7 +473,7 @@ void sd_card_mount(void) {
     ESP_LOGI(TAG_SD, "Filesystem mounted");
 
     // Card has been initialized, print its properties
-    sdmmc_card_print_info(stdout, card);
+    // sdmmc_card_print_info(stdout, card);
 
 }
 
@@ -651,28 +649,52 @@ void blink_task(void *pvParameter) {
     }
 }
 
-static void timer_task(void *pvParameter) {
+static void sd_timer_task(void *pvParameter) {
+    gpio_pad_select_gpio(USER_BLINK_GPIO);
+
+    gpio_set_direction(USER_BLINK_GPIO, GPIO_MODE_OUTPUT);
+
+    gpio_config_t io_conf;
+    //disable interrupt
+    io_conf.intr_type = GPIO_PIN_INTR_DISABLE;
+    //set as output mode
+    io_conf.mode = GPIO_MODE_OUTPUT;
+    //bit mask of the pins that you want to set,e.g.GPIO18/19
+    io_conf.pin_bit_mask = 1ULL<<USER_BLINK_GPIO;
+    //disable pull-down mode
+    io_conf.pull_down_en = 0;
+    //disable pull-up mode
+    io_conf.pull_up_en = 0;
+    //configure GPIO with the given settings
+    gpio_config(&io_conf);
+
+    int cnt = 0;
+
     while(1) {
         timer_event_t evt;
         xQueueReceive(s_timer_queue, &evt, portMAX_DELAY);
 
         /* Print information that the timer reported an event */
-        if (evt.info.auto_reload) {
-            printf("Timer Group with auto reload\n");
-        } else {
-            printf("Timer Group without auto reload\n");
-        }
-        printf("Group[%d], timer[%d] alarm event\n", evt.info.timer_group, evt.info.timer_idx);
+        // if (evt.info.auto_reload) {
+        //     printf("Timer Group with auto reload\n");
+        // } else {
+        //     printf("Timer Group without auto reload\n");
+        // }
+        // printf("Group[%d], timer[%d] alarm event\n", evt.info.timer_group, evt.info.timer_idx);
 
         /* Print the timer values passed by event */
-        printf("------- EVENT TIME --------\n");
-        print_timer_counter(evt.timer_counter_value);
+        // printf("------- EVENT TIME --------\n");
+        // print_timer_counter(evt.timer_counter_value);
+        
+        gpio_set_level(USER_BLINK_GPIO, 1);
+        sd_card_write();
+        gpio_set_level(USER_BLINK_GPIO, 0);
 
         /* Print the timer values as visible by this task */
-        printf("-------- TASK TIME --------\n");
-        uint64_t task_counter_value;
-        timer_get_counter_value(evt.info.timer_group, evt.info.timer_idx, &task_counter_value);
-        print_timer_counter(task_counter_value);
+        // printf("-------- TASK TIME --------\n");
+        // uint64_t task_counter_value;
+        // timer_get_counter_value(evt.info.timer_group, evt.info.timer_idx, &task_counter_value);
+        // print_timer_counter(task_counter_value);
     }
 }
 
@@ -787,7 +809,7 @@ void app_main(void) {
     tg_timer_init(TIMER_GROUP_1, TIMER_1, true, 2);
 
     // xTaskCreatePinnedToCore(&blink_task, "blink_task", 2048, NULL, 5, NULL, APP_CPU_NUM);
-    xTaskCreatePinnedToCore(&timer_task, "timer_task", 2048, NULL, 1, NULL, APP_CPU_NUM);
+    xTaskCreatePinnedToCore(&sd_timer_task, "sd_timer_task", 2048, NULL, 1, NULL, APP_CPU_NUM);
     xTaskCreatePinnedToCore(&mqtt_timer_task, "mqtt_timer_task", 2048, NULL, 3, NULL, PRO_CPU_NUM);
     xTaskCreatePinnedToCore(&http_timer_task, "http_timer_task", 8192, NULL, 5, NULL, PRO_CPU_NUM);
 }
