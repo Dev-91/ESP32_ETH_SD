@@ -14,6 +14,7 @@
 #include "driver/gpio.h"
 #include "driver/spi_master.h"
 #include "driver/timer.h"
+#include "driver/uart.h"
 
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
@@ -35,10 +36,11 @@
 
 #include <esp_http_client.h>
 
-static const char *TAG_ETH = "ethernet";
-static const char *TAG_MQTT = "mqtt";
-static const char *TAG_SD = "sd";
-static const char *TAG_HTTP = "http_client";
+static const char *TAG_ETH = "ETHERNET";
+static const char *TAG_MQTT = "MQTT";
+static const char *TAG_SD = "SD CARD";
+static const char *TAG_HTTP = "HTTP_CLIENT";
+static const char *TAG_RS485 = "RS485";
 
 int countX = 0;
 
@@ -46,6 +48,16 @@ int countX = 0;
 #define TIMER_SCALE           (TIMER_BASE_CLK / TIMER_DIVIDER)  // convert counter value to seconds
 
 #define USER_BLINK_GPIO 23
+
+#define USER_RS485_RX_GPIO 16
+#define USER_RS485_TX_GPIO 17
+#define USER_RS485_RTS -1
+#define USER_RS485_CTS -1
+#define USER_RS485_BAUD_RATE 115200
+#define UART_PORT_NUM 2
+#define READ_TIME_OUT 3
+#define BUF_SIZE 127
+#define PACKET_READ_TICS (100 / portTICK_RATE_MS)
 
 #define USER_SPI_MISO_GPIO 25
 #define USER_SPI_MOSI_GPIO 26
@@ -78,7 +90,7 @@ typedef struct {
     uint64_t timer_counter_value;
 } timer_event_t;
 
-static xQueueHandle s_timer_queue;
+static xQueueHandle sd_timer_queue;
 static xQueueHandle http_timer_queue;
 static xQueueHandle mqtt_timer_queue;
 
@@ -430,7 +442,7 @@ void sd_card_mount(void) {
     // production applications.
     ESP_LOGI(TAG_SD, "Using SPI peripheral");
 
-    sdmmc_host_t host = SDSPI_HOST_DEFAULT();
+    // sdmmc_host_t host = SDSPI_HOST_DEFAULT();
     /* ethernet 설정하면서 이미 SPI핀을 초기화함 
      * 그래서 SD 카드 부분의 SPI 초기화를 제거하고 같은 핀을 사용하도록함
      * 이미 같은 HSPI를 사용하기 때문에 다시 초기화시 에러가 발생함
@@ -558,7 +570,7 @@ static bool IRAM_ATTR timer_group_isr_callback(void *args) {
     /* Now just send the event data back to the main program task */
     if (info->timer_group == TIMER_GROUP_0) {
         if (info->timer_idx == TIMER_0) {
-            xQueueSendFromISR(s_timer_queue, &evt, &high_task_awoken);
+            xQueueSendFromISR(sd_timer_queue, &evt, &high_task_awoken);
         } else if (info->timer_idx == TIMER_1) {
             
         }
@@ -569,14 +581,6 @@ static bool IRAM_ATTR timer_group_isr_callback(void *args) {
             xQueueSendFromISR(mqtt_timer_queue, &evt, &high_task_awoken);
         }
     }
-    
-    
-    // if (timer_intr & TIMER_INTR_T0) {
-    //     xQueueSendFromISR(s_timer_queue, &evt, &high_task_awoken);
-    // } else if (timer_intr & TIMER_INTR_T1) {
-    //     xQueueSendFromISR(http_timer_queue, &evt, &high_task_awoken);
-    // }
-    // timer_spinlock_give(TIMER_GROUP_0);
 
     return high_task_awoken == pdTRUE; // return whether we need to yield at the end of ISR
 }
@@ -616,7 +620,16 @@ static void inline print_timer_counter(uint64_t counter_value) {
     printf("Time   : %.8f s\r\n", (double) counter_value / TIMER_SCALE);
 }
 
-void blink_task(void *pvParameter) {
+static void echo_send(const int port, const char* str, uint8_t length)
+{
+    if (uart_write_bytes(port, str, length) != length) {
+        ESP_LOGE(TAG_RS485, "Send data critical failure.");
+        // add your code to handle sending failure here
+        abort();
+    }
+}
+
+static void blink_task(void *pvParameter) {
     gpio_pad_select_gpio(USER_BLINK_GPIO);
 
     gpio_set_direction(USER_BLINK_GPIO, GPIO_MODE_OUTPUT);
@@ -672,7 +685,7 @@ static void sd_timer_task(void *pvParameter) {
 
     while(1) {
         timer_event_t evt;
-        xQueueReceive(s_timer_queue, &evt, portMAX_DELAY);
+        xQueueReceive(sd_timer_queue, &evt, portMAX_DELAY);
 
         /* Print information that the timer reported an event */
         // if (evt.info.auto_reload) {
@@ -698,7 +711,7 @@ static void sd_timer_task(void *pvParameter) {
     }
 }
 
-void mqtt_timer_task(void *pvParameter) {
+static void mqtt_timer_task(void *pvParameter) {
     gpio_pad_select_gpio(USER_BLINK_GPIO);
 
     gpio_set_direction(USER_BLINK_GPIO, GPIO_MODE_OUTPUT);
@@ -742,7 +755,7 @@ void mqtt_timer_task(void *pvParameter) {
     }
 }
 
-void http_timer_task(void *pvParameter) {
+static void http_timer_task(void *pvParameter) {
     while(1) {
         timer_event_t evt;
         xQueueReceive(http_timer_queue, &evt, portMAX_DELAY);
@@ -791,6 +804,78 @@ void http_timer_task(void *pvParameter) {
     }
 }
 
+static void rs485_recv_task(void *arg) {
+    const int uart_num = UART_PORT_NUM;
+    uart_config_t uart_config = {
+        .baud_rate = USER_RS485_BAUD_RATE,
+        .data_bits = UART_DATA_8_BITS,
+        .parity = UART_PARITY_DISABLE,
+        .stop_bits = UART_STOP_BITS_1,
+        .flow_ctrl = UART_HW_FLOWCTRL_DISABLE,
+        .rx_flow_ctrl_thresh = 122,
+        .source_clk = UART_SCLK_APB,
+    };
+
+    // Set UART log level
+    esp_log_level_set(TAG_RS485, ESP_LOG_INFO);
+
+    ESP_LOGI(TAG_RS485, "Start RS485 application test and configure UART.");
+
+    // Install UART driver (we don't need an event queue here)
+    // In this example we don't even use a buffer for sending data.
+    ESP_ERROR_CHECK(uart_driver_install(uart_num, BUF_SIZE * 2, 0, 0, NULL, 0));
+
+    // Configure UART parameters
+    ESP_ERROR_CHECK(uart_param_config(uart_num, &uart_config));
+
+    ESP_LOGI(TAG_RS485, "UART set pins, mode and install driver.");
+
+    // Set UART pins as per KConfig settings
+    ESP_ERROR_CHECK(uart_set_pin(uart_num, USER_RS485_TX_GPIO, USER_RS485_RX_GPIO, USER_RS485_RTS, USER_RS485_CTS));
+
+    // Set RS485 half duplex mode
+    ESP_ERROR_CHECK(uart_set_mode(uart_num, UART_MODE_RS485_HALF_DUPLEX));
+
+    // Set read timeout of UART TOUT feature
+    ESP_ERROR_CHECK(uart_set_rx_timeout(uart_num, READ_TIME_OUT));
+
+    // Allocate buffers for UART
+    uint8_t* rs485_read_data = (uint8_t*) malloc(BUF_SIZE);
+
+    ESP_LOGI(TAG_RS485, "UART start recieve loop.\r\n");
+    // echo_send(uart_num, "Start RS485 UART test.\r\n", 24);
+
+    while(1) {
+        //Read data from UART
+        int len = uart_read_bytes(uart_num, rs485_read_data, BUF_SIZE, PACKET_READ_TICS);
+
+        //Write data back to UART
+        if (len > 0) {
+            echo_send(uart_num, "\r\n", 2);
+            char prefix[] = "RS485 Received: [";
+            echo_send(uart_num, prefix, (sizeof(prefix) - 1));
+            ESP_LOGI(TAG_RS485, "Received %u bytes:", len);
+            printf("[ ");
+            for (int i = 0; i < len; i++) {
+                printf("0x%.2X ", (uint8_t)rs485_read_data[i]);
+                echo_send(uart_num, (const char*)&rs485_read_data[i], 1);
+                // Add a Newline character if you get a return charater from paste (Paste tests multibyte receipt/buffer)
+                if (rs485_read_data[i] == '\r') {
+                    echo_send(uart_num, "\n", 1);
+                }
+            }
+            printf("] \n");
+            echo_send(uart_num, "]\r\n", 3);
+        } else {
+            // Echo a "." to show we are alive while we wait for input
+            // echo_send(uart_num, ".", 1);
+            ESP_ERROR_CHECK(uart_wait_tx_done(uart_num, 10));
+        }
+    }
+    vTaskDelete(NULL);
+}
+
+
 void app_main(void) {
     dev_info();
 
@@ -801,7 +886,7 @@ void app_main(void) {
 
     sd_card_mount();
 
-    s_timer_queue = xQueueCreate(10, sizeof(timer_event_t));
+    sd_timer_queue = xQueueCreate(10, sizeof(timer_event_t));
     http_timer_queue = xQueueCreate(10, sizeof(timer_event_t));
     mqtt_timer_queue = xQueueCreate(10, sizeof(timer_event_t));
     tg_timer_init(TIMER_GROUP_0, TIMER_0, true, 10);
@@ -809,7 +894,8 @@ void app_main(void) {
     tg_timer_init(TIMER_GROUP_1, TIMER_1, true, 2);
 
     // xTaskCreatePinnedToCore(&blink_task, "blink_task", 2048, NULL, 5, NULL, APP_CPU_NUM);
-    xTaskCreatePinnedToCore(&sd_timer_task, "sd_timer_task", 2048, NULL, 1, NULL, APP_CPU_NUM);
-    xTaskCreatePinnedToCore(&mqtt_timer_task, "mqtt_timer_task", 2048, NULL, 3, NULL, PRO_CPU_NUM);
-    xTaskCreatePinnedToCore(&http_timer_task, "http_timer_task", 8192, NULL, 5, NULL, PRO_CPU_NUM);
+    xTaskCreatePinnedToCore(&sd_timer_task, "sd_timer_task", 2048, NULL, 4, NULL, APP_CPU_NUM);
+    xTaskCreatePinnedToCore(&rs485_recv_task, "rs485_recv_task", 2048, NULL, 5, NULL, APP_CPU_NUM);
+    xTaskCreatePinnedToCore(&mqtt_timer_task, "mqtt_timer_task", 2048, NULL, 1, NULL, PRO_CPU_NUM);
+    xTaskCreatePinnedToCore(&http_timer_task, "http_timer_task", 8192, NULL, 3, NULL, PRO_CPU_NUM);
 }
