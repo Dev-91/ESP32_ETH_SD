@@ -90,7 +90,7 @@ typedef struct {
     uint64_t timer_counter_value;
 } timer_event_t;
 
-static xQueueHandle sd_timer_queue;
+static xQueueHandle process_timer_queue;
 static xQueueHandle http_timer_queue;
 static xQueueHandle mqtt_timer_queue;
 
@@ -347,7 +347,6 @@ static void mqtt_event_handler(void *handler_args, esp_event_base_t base, int32_
             log_error_if_nonzero("reported from tls stack", event->error_handle->esp_tls_stack_err);
             log_error_if_nonzero("captured as transport's socket errno",  event->error_handle->esp_transport_sock_errno);
             ESP_LOGI(TAG_MQTT, "Last errno string (%s)", strerror(event->error_handle->esp_transport_sock_errno));
-
         }
         break;
     default:
@@ -570,7 +569,7 @@ static bool IRAM_ATTR timer_group_isr_callback(void *args) {
     /* Now just send the event data back to the main program task */
     if (info->timer_group == TIMER_GROUP_0) {
         if (info->timer_idx == TIMER_0) {
-            xQueueSendFromISR(sd_timer_queue, &evt, &high_task_awoken);
+            xQueueSendFromISR(process_timer_queue, &evt, &high_task_awoken);
         } else if (info->timer_idx == TIMER_1) {
             
         }
@@ -648,66 +647,30 @@ static void blink_task(void *pvParameter) {
     //configure GPIO with the given settings
     gpio_config(&io_conf);
 
-    int cnt = 0;
-
     while(1) {
         gpio_set_level(USER_BLINK_GPIO, cnt % 2);
         vTaskDelay(1000 / portTICK_PERIOD_MS);
-
-        cnt++;
-        if (cnt == 5) {
-            sd_card_write();
-            cnt = 0;
-        }
     }
 }
 
-static void sd_timer_task(void *pvParameter) {
-    gpio_pad_select_gpio(USER_BLINK_GPIO);
-
-    gpio_set_direction(USER_BLINK_GPIO, GPIO_MODE_OUTPUT);
-
-    gpio_config_t io_conf;
-    //disable interrupt
-    io_conf.intr_type = GPIO_PIN_INTR_DISABLE;
-    //set as output mode
-    io_conf.mode = GPIO_MODE_OUTPUT;
-    //bit mask of the pins that you want to set,e.g.GPIO18/19
-    io_conf.pin_bit_mask = 1ULL<<USER_BLINK_GPIO;
-    //disable pull-down mode
-    io_conf.pull_down_en = 0;
-    //disable pull-up mode
-    io_conf.pull_up_en = 0;
-    //configure GPIO with the given settings
-    gpio_config(&io_conf);
-
-    int cnt = 0;
+static void process_timer_task(void *pvParameter) {
 
     while(1) {
         timer_event_t evt;
-        xQueueReceive(sd_timer_queue, &evt, portMAX_DELAY);
-
-        /* Print information that the timer reported an event */
-        // if (evt.info.auto_reload) {
-        //     printf("Timer Group with auto reload\n");
-        // } else {
-        //     printf("Timer Group without auto reload\n");
-        // }
-        // printf("Group[%d], timer[%d] alarm event\n", evt.info.timer_group, evt.info.timer_idx);
-
-        /* Print the timer values passed by event */
-        // printf("------- EVENT TIME --------\n");
-        // print_timer_counter(evt.timer_counter_value);
+        xQueueReceive(process_timer_queue, &evt, portMAX_DELAY);
         
+        // RS485 데이터 요청
+
+        // RS485 데이터 수신
+
+        // 데이터 처리 및 가공
+
+        // https josn 전송
+
+        // 데이터 sd 카드 저장
         gpio_set_level(USER_BLINK_GPIO, 1);
         sd_card_write();
         gpio_set_level(USER_BLINK_GPIO, 0);
-
-        /* Print the timer values as visible by this task */
-        // printf("-------- TASK TIME --------\n");
-        // uint64_t task_counter_value;
-        // timer_get_counter_value(evt.info.timer_group, evt.info.timer_idx, &task_counter_value);
-        // print_timer_counter(task_counter_value);
     }
 }
 
@@ -886,7 +849,7 @@ void app_main(void) {
 
     sd_card_mount();
 
-    sd_timer_queue = xQueueCreate(10, sizeof(timer_event_t));
+    process_timer_queue = xQueueCreate(10, sizeof(timer_event_t));
     http_timer_queue = xQueueCreate(10, sizeof(timer_event_t));
     mqtt_timer_queue = xQueueCreate(10, sizeof(timer_event_t));
     tg_timer_init(TIMER_GROUP_0, TIMER_0, true, 10);
@@ -894,8 +857,9 @@ void app_main(void) {
     tg_timer_init(TIMER_GROUP_1, TIMER_1, true, 2);
 
     // xTaskCreatePinnedToCore(&blink_task, "blink_task", 2048, NULL, 5, NULL, APP_CPU_NUM);
-    xTaskCreatePinnedToCore(&sd_timer_task, "sd_timer_task", 2048, NULL, 4, NULL, APP_CPU_NUM);
-    xTaskCreatePinnedToCore(&rs485_recv_task, "rs485_recv_task", 2048, NULL, 5, NULL, APP_CPU_NUM);
+    xTaskCreatePinnedToCore(&process_timer_task, "process_timer_task", 2048, NULL, 4, NULL, APP_CPU_NUM);
     xTaskCreatePinnedToCore(&mqtt_timer_task, "mqtt_timer_task", 2048, NULL, 1, NULL, PRO_CPU_NUM);
     xTaskCreatePinnedToCore(&http_timer_task, "http_timer_task", 8192, NULL, 3, NULL, PRO_CPU_NUM);
+
+    xTaskCreatePinnedToCore(&rs485_recv_task, "rs485_recv_task", 2048, NULL, 5, NULL, APP_CPU_NUM);
 }
