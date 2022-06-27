@@ -9,6 +9,7 @@ ESP32 사용해서 이것저것 테스트 중...
 2022.05.31 - http client 및 get, post 테스트  
 2022.06.01 - chip information 출력  
 2022.06.23 - timer code 추가 및 GPIO핀 재정의  
+2022.06.27 - RS485 Echo 테스트 코드 추가  
 
 [My Blog](https://dev91.tistory.com/)
 
